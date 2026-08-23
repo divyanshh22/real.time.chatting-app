@@ -9,9 +9,10 @@ A real-time chat application built with Django, Channels, and WebSockets.
 | Backend          | Python 3.13, Django 5/6                          |
 | Real-Time        | Django Channels 4, WebSockets                    |
 | ASGI Server      | Daphne                                           |
+| Reverse Proxy    | Nginx (static/media serving, WebSocket proxying) |
 | Database         | PostgreSQL                                       |
 | Channel Layer    | Redis (pub/sub)                                  |
-| Static Files     | WhiteNoise                                       |
+| Static Files     | WhiteNoise + Nginx                               |
 | Media Storage    | Cloudinary / local media                         |
 | Containerization | Docker, Docker Compose                           |
 
@@ -28,11 +29,13 @@ A real-time chat application built with Django, Channels, and WebSockets.
 Requires Docker and Docker Compose.
 
 ```bash
-# Build and start all services (web + PostgreSQL + Redis)
+# Build and start all services (Nginx + web + PostgreSQL + Redis)
 docker compose up --build
 ```
 
-Then open http://localhost:8000
+Then open http://localhost
+
+Architecture: **Nginx** listens on port 80, serves `/static/` and `/media/` directly, and proxies HTTP + WebSocket (`/ws/`) traffic to **Daphne** inside the `web` container.
 
 The entrypoint automatically runs migrations and collects static files before starting Daphne.
 
