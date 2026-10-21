@@ -103,7 +103,7 @@ else:
 
 DATABASES = {
     'default': dj_database_url.config(
-        default='postgres://postgres:Hitman%404165@localhost:5432/newchatdb',
+        default='postgres://localhost:5432/newchatdb',
         conn_max_age=600,
         conn_health_checks=True,
     )
