@@ -1,0 +1,30 @@
+# Coverage configuration: measure only the application's own code.
+# (pytest.ini passes --cov=. so this file narrows what "." means.)
+
+[run]
+branch = False
+source = .
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+
+omit =
+    .venv/*
+    */site-packages/*
+    tests/*
+    */tests/*
+    */tests.py
+    */migrations/*
+    manage.py
+    settings_test.py
+    ws_manual_check.py
+    chattingapp/wsgi.py
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

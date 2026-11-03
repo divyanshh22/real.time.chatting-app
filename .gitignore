@@ -23,3 +23,11 @@ staticfiles/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Tests, coverage & lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
