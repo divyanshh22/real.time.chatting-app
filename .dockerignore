@@ -15,6 +15,7 @@ staticfiles/
 # Git & IDE
 .git/
 .gitignore
+.github/
 .idea/
 .vscode/
 
@@ -23,8 +24,21 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
+# Secrets (never bake local env files into the image)
+.env
+.env.*
+
+# Tests, coverage & lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
 # Misc
 README.md
 build.sh
 Procfile
 test_ws.py
+docs/
+Django_Chat_App_Presentation.pptx

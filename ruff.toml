@@ -1,0 +1,32 @@
+# Ruff configuration (linting + formatting).
+#
+# Scope decision: the *lint* rules below are deliberately minimal (pyflakes
+# + the critical pycodestyle categories). They catch real bugs — unused/
+# undefined names, syntax errors, redefinitions — without forcing a
+# repo-wide style rewrite of the existing production code.
+# The formatter is only checked on the NEW files this repo's test/CI work
+# added (see .github/workflows/ci.yml), because running `ruff format`
+# across the whole repository would rewrite thousands of lines of existing
+# application code.
+
+line-length = 120
+target-version = "py313"
+exclude = [
+    ".venv",
+    "*/migrations/*",
+    "staticfiles",
+    "db.sqlite3",
+]
+
+[lint]
+select = [
+    "E4",  # imports (unsorted is NOT enforced — would churn existing code)
+    "E7",  # statement issues (lambda assignment, comparison to True/None, ...)
+    "E9",  # runtime / syntax errors
+    "F",   # pyflakes: undefined names, unused imports/vars, redefinitions
+]
+
+[lint.per-file-ignores]
+# Django's ASGI entrypoint must set DJANGO_SETTINGS_MODULE before importing
+# anything that touches settings, so imports after that line are intentional.
+"chattingapp/asgi.py" = ["E402"]

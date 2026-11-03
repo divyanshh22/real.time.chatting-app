@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: the pipeline only needs to read the repository.
+permissions:
+  contents: read
+
+# New pushes to the same branch/PR cancel older, now irrelevant runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Static analysis: pyflakes-style bug detection + format check on new code.
+  # --------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13" # matches the Dockerfile base image
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: ruff check (lint rules from ruff.toml)
+        run: ruff check .
+
+      # Scope decision (documented in ruff.toml): only the files added by the
+      # testing/CI work are format-checked. Running `ruff format --check .`
+      # would rewrite thousands of lines of existing application code, which
+      # is out of scope for this pipeline.
+      - name: ruff format --check (new files only)
+        run: ruff format --check tests/ login/utils.py settings_test.py
+
+  # --------------------------------------------------------------------------
+  # Test suite: Django checks, migration completeness, pytest + coverage.
+  # Runs against PostgreSQL (the production engine); Redis is provisioned to
+  # mirror the production topology.
+  # --------------------------------------------------------------------------
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chatdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # CI-only values: never reused anywhere real.
+      SECRET_KEY: ci-only-secret-key-for-github-actions
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/chatdb
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # Django's own checks, with the repository's real settings module
+      # (manage.py defaults to chattingapp.settings).
+      - name: Django system check
+        run: python manage.py check
+
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run
+
+      # pytest.ini selects settings_test (safe overrides: no Redis/Cloudinary
+      # usage, fast hashing, filesystem storage). 88% = the measured local
+      # coverage floor (88.96% measured on Python 3.13).
+      - name: Run test suite with coverage
+        env:
+          DJANGO_SETTINGS_MODULE: settings_test
+        run: pytest --cov-fail-under=88
+
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Verify the Dockerfile still builds. Never pushes anywhere.
+  # --------------------------------------------------------------------------
+  docker-build:
+    name: Docker image build (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t chattingapp:ci .
