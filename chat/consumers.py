@@ -34,20 +34,30 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self._announce_status('online')
 
     async def disconnect(self, close_code):
-        if hasattr(self, 'room_group_name'):
-            try:
-                await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
-            except Exception:
-                pass
+        if not hasattr(self, 'room_group_name'):
+            # connect() never completed (no prior connect, anonymous user, or
+            # unknown chat partner) — there is nothing to clean up.
+            return
+
+        try:
+            await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
+        except Exception:
+            pass
 
         await database_sync_to_async(self._set_online_state)(self.me.id, False)
         await self._announce_status('offline')
 
     async def receive(self, text_data=None, bytes_data=None):
         if text_data is None:
+            return  # binary frames are ignored
+
+        try:
+            payload = json.loads(text_data)
+        except (ValueError, TypeError):
+            return  # malformed JSON is dropped instead of crashing the consumer
+        if not isinstance(payload, dict):
             return
 
-        payload = json.loads(text_data)
         message_type = payload.get('type')
 
         if message_type == 'message':
@@ -117,7 +127,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             pass
 
     async def _handle_message(self, payload):
-        text = (payload.get('text') or '').strip()
+        text = payload.get('text')
+        if not isinstance(text, str):
+            return  # non-string text (int, list, dict, ...) is dropped
+        # NUL bytes would crash PostgreSQL inserts (psycopg2 ValueError)
+        text = text.replace('\x00', '').strip()
         if not text:
             return
 
@@ -155,10 +169,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
 
     async def _mark_messages_read(self, message_ids):
-        if not message_ids:
+        if not isinstance(message_ids, (list, tuple)):
+            return
+        # keep only real integer ids — strings/None/bools would crash the ORM
+        ids = [mid for mid in message_ids if isinstance(mid, int) and not isinstance(mid, bool)]
+        if not ids:
             return
 
-        updated = await database_sync_to_async(self._mark_ids_as_read)(message_ids)
+        updated = await database_sync_to_async(self._mark_ids_as_read)(ids)
         if not updated:
             return
 
@@ -167,7 +185,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 self.room_group_name,
                 {
                     'type': 'messages_read',
-                    'message_ids': message_ids,
+                    'message_ids': ids,
                 }
             )
         except Exception:

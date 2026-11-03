@@ -2,7 +2,11 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib import messages
 from django.contrib.auth import login, logout, authenticate
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from .models import CustomUser, ProfilePic
+from .utils import is_valid_image_upload
 
 
 def login_view(request):
@@ -10,8 +14,12 @@ def login_view(request):
         return redirect('chat:home-view')
 
     if request.method == 'POST':
-        username = request.POST['username']
-        password = request.POST['password']
+        username = request.POST.get('username', '').strip()
+        password = request.POST.get('password', '')
+
+        if not username or not password:
+            messages.error(request, "Username and password are required!")
+            return redirect('login-view')
 
         user = authenticate(request, username=username, password=password)
 
@@ -35,15 +43,31 @@ def register_view(request):
         return redirect('chat:home-view')
 
     if request.method == 'POST':
-        username   = request.POST['username']
-        first_name = request.POST['first_name']
-        last_name  = request.POST['last_name']
-        email      = request.POST['email']
-        password1  = request.POST['password1']
-        password2  = request.POST['password2']
+        username   = request.POST.get('username', '').strip()
+        first_name = request.POST.get('first_name', '').strip()
+        last_name  = request.POST.get('last_name', '').strip()
+        email      = request.POST.get('email', '').strip()
+        password1  = request.POST.get('password1', '')
+        password2  = request.POST.get('password2', '')
+
+        if not all([username, first_name, last_name, email, password1, password2]):
+            messages.error(request, "All fields are required!")
+            return redirect('register-view')
 
         if password1 != password2:
             messages.error(request, "Password Don't Match")
+            return redirect('register-view')
+
+        try:
+            validate_email(email)
+        except ValidationError:
+            messages.error(request, "Enter a valid email address!")
+            return redirect('register-view')
+
+        try:
+            validate_password(password1)
+        except ValidationError as e:
+            messages.error(request, " ".join(e.messages))
             return redirect('register-view')
 
         if CustomUser.objects.filter(username=username).exists():
@@ -55,7 +79,7 @@ def register_view(request):
             return redirect('register-view')
 
         try:
-            user = CustomUser.objects.create_user(
+            CustomUser.objects.create_user(
                 username=username,
                 first_name=first_name,
                 last_name=last_name,
@@ -84,6 +108,9 @@ def profile_view(request):
 
     if request.method == 'POST':
         pic = request.FILES.get('profile_pic')
+        if pic and not is_valid_image_upload(pic):
+            messages.error(request, "Please upload a valid image (JPG, PNG, WEBP) under 5 MB.")
+            return redirect('profile-view')
         if pic:
             profile.profile_pic = pic
             profile.save()

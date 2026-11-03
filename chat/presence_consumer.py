@@ -42,12 +42,28 @@ class PresenceConsumer(AsyncWebsocketConsumer):
             )
             await self.channel_layer.group_discard("global_presence", self.channel_name)
 
-    async def receive(self, text_data):
+    async def receive(self, text_data=None, bytes_data=None):
+        if text_data is None:
+            return  # binary frames are ignored
+
+        try:
+            data = json.loads(text_data)
+        except (ValueError, TypeError):
+            return  # malformed JSON is dropped instead of crashing
+        if not isinstance(data, dict):
+            return
+
         # Client can ask "who's online right now" when the page loads
-        data = json.loads(text_data)
         if data.get("type") == "get_status":
             user_ids = data.get("user_ids", [])
-            statuses = await self.get_statuses(user_ids)
+            if not isinstance(user_ids, (list, tuple)):
+                return
+            # keep only real integer ids — strings/None/bools would crash the ORM
+            valid_ids = [
+                uid for uid in user_ids
+                if isinstance(uid, int) and not isinstance(uid, bool)
+            ]
+            statuses = await self.get_statuses(valid_ids)
             await self.send(text_data=json.dumps({
                 "type": "bulk_status",
                 "statuses": statuses

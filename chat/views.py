@@ -2,6 +2,7 @@ import redis
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
+from django.contrib import messages as django_messages
 from django.contrib.auth.decorators import login_required
 from django.db.models import Q
 from django.http import JsonResponse
@@ -10,6 +11,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from login.models import CustomUser, ProfilePic
+from login.utils import is_valid_image_upload
 
 from .models import Message
 
@@ -166,8 +168,14 @@ def conversation_view(request, username):
 
     # POST - naya message save karo
     if request.method == 'POST':
-        text = request.POST.get('text', '').strip()
+        # NUL bytes would crash PostgreSQL inserts (psycopg2 ValueError)
+        text = request.POST.get('text', '').replace('\x00', '').strip()
         photo = request.FILES.get('photo')
+
+        if photo and not is_valid_image_upload(photo):
+            # NB: aliased import — this function has a local `messages` QuerySet
+            django_messages.error(request, "Please upload a valid image (JPG, PNG, WEBP) under 5 MB.")
+            return redirect('chat:conversation-view', username=username)
 
         if text or photo:
             message = Message.objects.create(
@@ -225,8 +233,12 @@ def search_view(request):
 @require_http_methods(["POST"])
 def send_message_api(request, username):
     other_user = get_object_or_404(CustomUser, username=username)
-    text = request.POST.get('text', '').strip()
+    # NUL bytes would crash PostgreSQL inserts (psycopg2 ValueError)
+    text = request.POST.get('text', '').replace('\x00', '').strip()
     photo = request.FILES.get('photo')
+
+    if photo and not is_valid_image_upload(photo):
+        return JsonResponse({'error': 'Invalid image file'}, status=400)
 
     if not text and not photo:
         return JsonResponse({'error': 'Message cannot be empty'}, status=400)
