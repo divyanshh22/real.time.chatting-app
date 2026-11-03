@@ -3,7 +3,7 @@
 **Date:** 2026-11-04
 **Repository:** `divyanshh22/real.time.chatting-app` (branch `main`)
 **Test environment (local, measured):** Windows, Python 3.13.7, Django 6.0.5, SQLite in-memory, in-memory Channels layer
-**CI environment (configured, not yet executed):** GitHub Actions, Ubuntu, Python 3.13, PostgreSQL 16 + Redis 7
+**CI environment (GitHub Actions — run #1: success):** Ubuntu, Python 3.13, PostgreSQL 16 + Redis 7
 
 ---
 
@@ -22,7 +22,7 @@
 | `ruff format --check` (new files) | **13 files already formatted** |
 | `python manage.py check` | `System check identified no issues (0 silenced)` (exit 0) |
 | `python manage.py makemigrations --check --dry-run` | `No changes detected` (exit 0) |
-| GitHub Actions CI | **Not yet run on GitHub** — the workflow is committed and locally validated, but it has not executed against the remote until the code is pushed (see §9) |
+| GitHub Actions CI | **Run #1 (commit `3b872f6`) → `success`**: all 3 jobs green — Lint 14 s, Tests 99 s, Docker build 28 s (2026-11-04). The pytest step passed *on PostgreSQL* under the `--cov-fail-under=88` gate |
 
 ## 2. How to run
 
@@ -161,12 +161,14 @@ Triggers: `push` and `pull_request` to `main`. `permissions: contents: read`, co
 
 Locally validated: the YAML parses (pyyaml), the lint steps pass verbatim, both Django check commands exit 0, and `pytest --cov-fail-under=88` exits 0. A `.dockerignore` was extended (keeping all pre-existing entries) so the build context excludes `.venv`, `.git`, `.env`, caches, and docs.
 
+Validated **on GitHub**: run #1 (commit `3b872f6`, 2026-11-04) finished with `conclusion=success` — *Lint (ruff)*, *Tests (pytest)*, and *Docker image build (no push)* all green, with every step succeeding (`Django system check`, `Check for missing migrations`, `Run test suite with coverage` against the PostgreSQL service, `Upload coverage.xml`).
+
 **Scope decision (documented in `ruff.toml`):** `ruff format` is checked only on the files this work added. Reformatting the whole repository would rewrite **thousands of lines** of existing application code (~31 files), which is a style overhaul, not a "trivial fix" — so it was deliberately left out of scope. Lint rules are likewise minimal (pyflakes + critical pycodestyle), chosen because they catch real bugs without churning existing code.
 
 ## 9. Honest limitations
 
-1. **CI has not run on GitHub yet.** The workflow file is committed and every step was validated locally, but no green checkmark exists until the code is pushed and Actions executes it.
-2. **Local runs used SQLite; CI uses PostgreSQL.** No credentials for the local PostgreSQL server were available (connection requires a password) and Docker is not installed in this environment, so the 209-test/88.96 % measurement is from SQLite in-memory. The suite contains no raw SQL (verified), only portable ORM calls, and the PostgreSQL-specific hazards (NUL bytes, `LIKE` wildcards) are covered by dedicated tests — but the PostgreSQL execution itself is pending CI.
+1. **The exact coverage percentage in this report is from the local SQLite run.** The 209-test / 88.96 % numbers were measured locally on SQLite in-memory (the local PostgreSQL server needs a password that was not available, and Docker is not installed in this environment). GitHub run #1 executed the same suite against **PostgreSQL 16 and passed under the ≥88 % gate**, but the CI-side percentage is only visible in the run's `coverage.xml` artifact / job log in the Actions UI (both require being logged in — plain API downloads return 403).
+2. **PostgreSQL execution happens only in CI.** Day-to-day local testing uses SQLite; PostgreSQL parity is provided (and was verified by run #1) by the CI service container rather than by the developer machine.
 3. **No browser-level E2E tests.** WebSockets are tested through Django Channels communicators over the real ASGI app (session cookie authentication included), not through a real browser. No Selenium/Playwright was introduced.
 4. **Line coverage only** (no branch coverage), measured in-process — subprocess-based tests (`manage.py check`, production-settings checks) contribute assertions but not coverage lines.
 5. **Known product limitations, documented by tests rather than "fixed"** (they are design decisions, out of scope to change):
@@ -175,12 +177,12 @@ Locally validated: the YAML parses (pyyaml), the lint steps pass verbatim, both 
    - with no `SECRET_KEY` environment variable the production settings fall back to a hardcoded insecure key (asserted by `test_production_settings_default_secret_key_is_used_when_env_missing` — deployment **must** set the env var);
    - `DEBUG` defaults to `True` when the env var is unset, which disables all secure-cookie/SSL flags (asserted by `test_debug_true_disables_secure_flags`).
 6. The 5 pre-existing `TestCase`-style tests in `chat/tests.py` / `login/tests.py` were intentionally left untouched; they are still collected by pytest and pass.
-7. The README CI badge will show "no status" until the first workflow run completes on GitHub.
+7. The README CI badge now reflects run #1 (passing) and updates automatically after each workflow run.
 
 ## 10. Next steps
 
-1. **Push to `origin/main`** (6 new commits: `1e380ee` infra → `96b87c1` tests → `c3951dd` app fixes → `6d41ec3` CI → `5b8bc74` README → report), then open the **Actions** tab: the expected result is three green jobs (lint / test / docker-build) and a populated README badge.
-2. Watch the first **test** job especially: it is the first execution against PostgreSQL. If a divergence appears, the failing test name will pinpoint it (all analysis so far says it should pass).
+1. **Pushed ✓ / CI green ✓** — everything is on `origin/main` of `divyanshh22/real.time.chatting-app` (the placeholder README commit was replaced with `--force-with-lease`), and run #1 finished with three green jobs; the README badge shows the passing status. Future pushes/PRs to `main` re-run the same pipeline.
+2. **Optional:** open run #1 in the Actions UI while logged in to see the coverage table from the PostgreSQL run and download the `coverage.xml` artifact — it is the only CI-side number not quoted in this report (the public API returns 403 for logs/artifacts).
 3. Optional deployment hardening: configure the host (e.g. Render) to **wait for CI** before deploying, so a red build never reaches production.
 4. Coverage follow-ups if desired: exercise the Redis-presence fallback in `chat/views.py` (needs a Redis-enabled settings variant) to push `chat/views.py` past 90 %.
 5. Optional cleanup: suppress the cosmetic `staticfiles` `UserWarning` in `pytest.ini` (`filterwarnings`) to take the suite from 113 warnings to 0.
