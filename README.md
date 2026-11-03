@@ -1,5 +1,7 @@
 # Django-Real-Time-Chat-Application
 
+[![CI](https://github.com/divyanshh22/Django-Real-Time-Chat-Application/actions/workflows/ci.yml/badge.svg)](https://github.com/divyanshh22/Django-Real-Time-Chat-Application/actions/workflows/ci.yml)
+
 A real-time chat application built with Django, Channels, and WebSockets.
 
 ## Tech Stack
@@ -78,3 +80,45 @@ By default the channel layer is in-memory; set `USE_REDIS=true` and `REDIS_URL` 
 | `DATABASE_URL`  | Postgres connection string               | local postgres           |
 | `USE_REDIS`     | Enable Redis channel layer               | `false`                  |
 | `REDIS_URL`     | Redis connection string                  | `redis://localhost:6379` |
+
+## Testing
+
+The project ships with a pytest-only test suite (no `unittest.TestCase` in the
+new tests) covering models, view-level validation, auth, consumers/WebSockets,
+URL routing, security, and project health (system checks + migrations).
+
+```bash
+# 1. Install the dev/test dependencies (production requirements stay separate)
+pip install -r requirements-dev.txt
+
+# 2. Run the full suite (coverage is enabled by default via pytest.ini addopts)
+pytest
+
+# 3. Run only the WebSocket/consumer tests
+pytest -m websocket
+
+# 4. Run with a coverage report
+pytest --cov
+```
+
+Useful variants:
+
+```bash
+pytest -m security          # security-focused tests only
+pytest tests/test_views.py  # a single file
+pytest -x                   # stop at the first failure
+```
+
+Notes:
+
+- Tests run with `settings_test.py` (selected automatically by `pytest.ini`):
+  in-memory SQLite locally (PostgreSQL in CI via `DATABASE_URL`), an
+  in-memory Channels layer, the filesystem storage instead of Cloudinary, and
+  a network blocker that forbids non-local connections. No Redis, Cloudinary,
+  or other external services are ever contacted.
+- Current measured line coverage of the application code: **88.96%**
+  (589 statements); CI enforces `--cov-fail-under=88`.
+- CI (`.github/workflows/ci.yml`) runs on every push/PR to `main`:
+  `ruff check` + `ruff format --check` (new files), `manage.py check`,
+  `makemigrations --check --dry-run`, the full pytest suite against
+  PostgreSQL, and a Docker image build (never pushed).
