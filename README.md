@@ -1,6 +1,6 @@
 # Django-Real-Time-Chat-Application
 
-[![CI](https://github.com/divyanshh22/Django-Real-Time-Chat-Application/actions/workflows/ci.yml/badge.svg)](https://github.com/divyanshh22/Django-Real-Time-Chat-Application/actions/workflows/ci.yml)
+[![CI](https://github.com/divyanshh22/real.time.chatting-app/actions/workflows/ci.yml/badge.svg)](https://github.com/divyanshh22/real.time.chatting-app/actions/workflows/ci.yml)
 
 A real-time chat application built with Django, Channels, and WebSockets.
 

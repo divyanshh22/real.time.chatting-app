@@ -1,7 +1,7 @@
 # Testing Report — Django Real-Time Chat Application
 
 **Date:** 2026-11-04
-**Repository:** `divyanshh22/Django-Real-Time-Chat-Application` (branch `main`)
+**Repository:** `divyanshh22/real.time.chatting-app` (branch `main`)
 **Test environment (local, measured):** Windows, Python 3.13.7, Django 6.0.5, SQLite in-memory, in-memory Channels layer
 **CI environment (configured, not yet executed):** GitHub Actions, Ubuntu, Python 3.13, PostgreSQL 16 + Redis 7
 
