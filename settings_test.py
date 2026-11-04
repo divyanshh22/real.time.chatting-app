@@ -38,7 +38,7 @@ EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 
 # Never hit real Cloudinary: store media on the local filesystem in a
 # per-run temp directory instead (settings.py only enables Cloudinary
-# when CLOUDINARY_CLOUD_NAME is set; we force it off regardless).
+# when all three CLOUDINARY_* values are set; we force it off regardless).
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -49,6 +49,11 @@ STORAGES = {
     },
 }
 CLOUDINARY_STORAGE = {}  # no Cloudinary credentials during tests
+
+# Presence grace period: tests want deterministic, immediate offline
+# transitions (the grace-window behaviour is tested with an explicit
+# override in tests/test_presence.py).
+PRESENCE_OFFLINE_GRACE_SECONDS = 0
 
 # Database: keep DATABASE_URL (PostgreSQL in CI) if the environment provides
 # one; otherwise use SQLite in-memory for fast local runs.

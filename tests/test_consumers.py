@@ -13,7 +13,8 @@ Design notes learned from the real application:
       {"type": "message",
        "message": {"id": int, "sender_id": int, "sender_username": str,
                    "text": str, "photo_url": str|null,
-                   "timestamp": ISO-8601 str, "is_read": bool}}
+                   "timestamp": ISO-8601 str, "is_read": bool,
+                   "is_delivered": bool}}
 
 All ORM access inside async tests goes through ``sync_to_async`` (which runs
 in a sync thread — never in the event loop).
@@ -125,12 +126,14 @@ async def test_valid_message_broadcast_schema(user, other_user, user_cookie):
         "photo_url",
         "timestamp",
         "is_read",
+        "is_delivered",
     }
     assert message["text"] == "hello world"
     assert message["sender_id"] == user.id
     assert message["sender_username"] == user.username
     assert message["photo_url"] is None
     assert message["is_read"] is False
+    assert message["is_delivered"] is False
     assert isinstance(message["id"], int)
     parsed = datetime.fromisoformat(message["timestamp"])  # valid ISO-8601
     assert parsed.tzinfo is not None
@@ -154,6 +157,7 @@ async def test_message_persisted_exactly_once_with_correct_links(user, other_use
     assert msg.receiver_id == other_user.id
     assert msg.text == "persist me"
     assert msg.is_read is False
+    assert msg.is_delivered is False
 
 
 @pytest.mark.django_db(transaction=True)

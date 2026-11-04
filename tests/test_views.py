@@ -116,7 +116,7 @@ def test_conversation_page_renders_with_context(auth_client, user, other_user):
     assert resp.status_code == 200
     assert "chat/conversation.html" in [t.name for t in resp.templates]
     assert resp.context["other_user"].id == other_user.id
-    texts = [m.text for m in resp.context["messages"]]
+    texts = [m.text for m in resp.context["chat_messages"]]
     assert texts == ["history one", "history two"]
 
     html = resp.content.decode()
@@ -257,6 +257,7 @@ def test_messages_api_returns_only_this_thread_in_order(auth_client, user, other
             "photo_url",
             "timestamp",
             "is_read",
+            "is_delivered",
         }
 
 
@@ -291,6 +292,7 @@ def test_send_message_api_creates_and_returns_payload(auth_client, user, other_u
         "photo_url",
         "timestamp",
         "is_read",
+        "is_delivered",
     }
     assert message["sender_id"] == user.id
     assert message["sender_username"] == user.username
