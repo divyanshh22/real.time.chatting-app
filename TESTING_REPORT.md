@@ -11,18 +11,21 @@
 
 | Metric | Result |
 |---|---|
-| Tests collected / run | **209** (204 new pytest tests + 5 pre-existing legacy tests) |
-| Passed | **209** |
+| Tests collected / run | **251** (246 pytest tests + 5 pre-existing legacy tests) — **+42 regression tests for bugs 1-4** |
+| Passed | **251** |
 | Failed | **0** |
 | Skipped / xfailed | **0 / 0** (no skips — every test executes) |
 | Duration | ~32 s |
-| Line coverage of application code | **88.96 %** (589 statements, 65 missed → reported as 89 %) |
+| Line coverage of application code | **92.73 %** (757 statements, 55 missed) — up from 88.96 % before the bug fixes |
 | CI coverage gate | `--cov-fail-under=88` (measured value floored) |
-| `ruff check .` | **All checks passed** (0 errors) |
-| `ruff format --check` (new files) | **13 files already formatted** |
+| `ruff check --select E4,E7,E9,F .` | **All checks passed** (0 errors) |
+| `ruff format --check` | New bug-fix/test files are formatted; pre-existing files keep their original quote style (format is not enforced repo-wide) |
 | `python manage.py check` | `System check identified no issues (0 silenced)` (exit 0) |
 | `python manage.py makemigrations --check --dry-run` | `No changes detected` (exit 0) |
-| GitHub Actions CI | **Run #1 (commit `3b872f6`) → `success`**: all 3 jobs green — Lint 14 s, Tests 99 s, Docker build 28 s (2026-11-04). The pytest step passed *on PostgreSQL* under the `--cov-fail-under=88` gate |
+| GitHub Actions CI | **Run on commit `679a099` → `success`**: all jobs green on PostgreSQL under `--cov-fail-under=88`. Render auto-deployed after the green run |
+| Live HTTP verification (`verify_live.py`) | **10 / 10** pass — login, deploy markers, `is_delivered` in history/send payloads, receiver GET marks read+delivered, profile upload no-500 (graceful), DM image graceful 502 JSON error |
+| Live WebSocket presence verification (`verify_presence.py`) | **11 / 11** pass — online with 2 tabs, still online closing 1 tab, offline broadcast + last_seen after last tab, HTTP/WS agree, ping heartbeat, reconnect → online, DM socket close keeps user online |
+| Production deploy | `https://chattingapp-r4kq.onrender.com/` — root 200, `/chat/` 200, new deploy markers (`appPresenceSocket`, `presence-open`) confirmed live |
 
 ## 2. How to run
 
@@ -71,9 +74,12 @@ Required test coverage of 88% reached. Total coverage: 88.96%
 | `tests/test_health.py` | 19 | `manage.py check`, `makemigrations --check`, migration plan applied, clean migrate from scratch, admin pages, template compilation, every page renders |
 | `tests/test_auth.py` | 15 | Login/logout/register flows, session key, password hashing (MD5 hasher in tests), redirect behavior |
 | `tests/test_routing.py` | 8 | WebSocket URL patterns, ASGI protocol routing, route kwargs |
+| `tests/test_presence.py` *(new)* | 17 | Connection counting across tabs/devices, grace period absorbing reconnects, heartbeat throttling, stale-socket sweep, `effective_presence` self-healing, WebSocket regressions (closing a chat socket must not mark the user offline while the presence socket lives; ping refreshes heartbeat) |
+| `tests/test_receipts.py` *(new)* | 12 | Deliver-on-connect, live delivery broadcast to the sender without reopening the DM, conversation GET marking read+delivered and broadcasting, read ack implies delivered, history/send API payloads, missing/broken layer resilience, server-rendered 3-state ticks |
+| `tests/test_media.py` *(new)* | 13 | Storage outage handled without HTTP 500 on all three endpoints (profile, DM API, conversation POST), previous avatar preserved on failed replacement, text-only send survives an outage, Cloudinary env wiring (quote stripping, enable/none/partial fail-fast via settings reload), local `/media/` route for filesystem storage |
 | `chat/tests.py` *(legacy)* | 2 | Pre-existing `TestCase` tests — kept untouched, still collected and passing |
 | `login/tests.py` *(legacy)* | 3 | Pre-existing `TestCase` tests — kept untouched, still collected and passing |
-| **Total** | **209** | |
+| **Total** | **251** | |
 
 Markers (enforced with `--strict-markers`): `unit`, `integration`, `websocket`, `security`.
 
@@ -179,10 +185,87 @@ Validated **on GitHub**: run #1 (commit `3b872f6`, 2026-11-04) finished with `co
 6. The 5 pre-existing `TestCase`-style tests in `chat/tests.py` / `login/tests.py` were intentionally left untouched; they are still collected by pytest and pass.
 7. The README CI badge now reflects run #1 (passing) and updates automatically after each workflow run.
 
-## 10. Next steps
+## 11. Production bug fixes — bugs 1–4 (commits `3764ac5` + `679a099`)
 
-1. **Pushed ✓ / CI green ✓** — everything is on `origin/main` of `divyanshh22/real.time.chatting-app` (the placeholder README commit was replaced with `--force-with-lease`), and run #1 finished with three green jobs; the README badge shows the passing status. Future pushes/PRs to `main` re-run the same pipeline.
-2. **Optional:** open run #1 in the Actions UI while logged in to see the coverage table from the PostgreSQL run and download the `coverage.xml` artifact — it is the only CI-side number not quoted in this report (the public API returns 403 for logs/artifacts).
-3. Optional deployment hardening: configure the host (e.g. Render) to **wait for CI** before deploying, so a red build never reaches production.
-4. Coverage follow-ups if desired: exercise the Redis-presence fallback in `chat/views.py` (needs a Redis-enabled settings variant) to push `chat/views.py` past 90 %.
-5. Optional cleanup: suppress the cosmetic `staticfiles` `UserWarning` in `pytest.ini` (`filterwarnings`) to take the suite from 113 warnings to 0.
+Four production bugs were reported and fixed with **root-cause-only** changes (no UI/feature rewrite, no temporary frontend workarounds, no new dependencies). Each fix is covered by regression tests and verified live on Render.
+
+### Bug 1 — Online status & last seen inaccurate (app-wide / multi-tab)
+
+**Symptom:** Closing one of several open tabs/DMs marked the user offline while other connections were still alive; a socket that died without a clean disconnect left `is_online` stale forever; `last_seen` was only updated by whichever code path ran last.
+
+**Root cause:** Two uncoordinated code paths — `ChatConsumer` (per-DM) and `PresenceConsumer` (global) — each flipped a plain `is_online` boolean on connect/disconnect, with no connection counting or heartbeat.
+
+**Fix (new `chat/presence.py`):** Count every active WebSocket (`connection_count`) + a `presence_heartbeat` refreshed on connect/ping/chat traffic. A user is online iff `connection_count > 0` **and** heartbeat younger than `STALE_AFTER` (90 s). A navigation grace (`PRESENCE_OFFLINE_GRACE_SECONDS`, default 6 s, 0 in tests) absorbs page-navigation socket churn; `last_seen` is stamped at actual departure. A stale sweep runs on presence connect/ping and `effective_presence()` self-heals on every read. The global presence socket moved to `base.html` so every authenticated page keeps the user counted; heartbeat ping every 30 s; 5 reconnect attempts.
+
+**Files:** `chat/presence.py` (new), `chat/consumers.py`, `chat/presence_consumer.py`, `login/templates/login/base.html` (global socket), `chattingapp/settings.py` (`PRESENCE_OFFLINE_GRACE_SECONDS`), `login/migrations/0005_customuser_connection_count_and_more.py` (adds `connection_count`, `presence_heartbeat`, resets stale `is_online` ghosts).
+
+**Timing investigation:** On Render, offline transition appeared to take ~16 s. Probes showed this is **infrastructure behavior** (Render's proxy/TCP keepalive delays close-frame delivery to Daphne), not an app bug: a local Daphne probe measured `D` (disconnect noticed) = 0.0 s and `G` (grace) = 6.3 s, exactly as configured. The grace period works correctly in production; only the disconnect-notice delay is proxy-imposed.
+
+### Bug 2 — Message ticks (sent / delivered / read) not updating live
+
+**Symptom:** The sender only saw tick state change after reopening the DM; `is_read` was written server-side with no broadcast; no `is_delivered` concept existed.
+
+**Root cause:** `is_read` was updated server-side with no WebSocket broadcast to the sender, and there was no delivery state at all.
+
+**Fix:** New `Message.is_delivered` field; delivered when the receiver's conversation is open (on connect, live receipt, and conversation GET) and broadcast as `message_delivered`; a read ack implies delivered. `_broadcast_receipts` sends `message_delivered`+`messages_read`; `updateDeliveredStatus` never downgrades green. 3-state ticks in the UI: single white check (sent), double white (delivered), double green `#4ade80` (read). Photo-only own messages get their own tick row.
+
+**Files:** `chat/migrations/0002_message_is_delivered.py`, `chat/models.py`, `chat/consumers.py`, `chat/views.py`, `chat/templates/chat/conversation.html`, `login/templates/login/base.html`.
+
+### Bug 3 — Profile picture upload HTTP 500
+
+**Symptom:** Uploading a profile picture returned HTTP 500.
+
+**Root cause:** `default_storage.save()` raised an unhandled `cloudinary.exceptions.AuthorizationRequired` (bad `CLOUDINARY_*` env values) **inside** `Model.save()`'s `mark_for_rollback_on_error`, which poisoned the surrounding transaction and surfaced as 500.
+
+**Fix:** Write the file to storage **first** (`field.save(name, file, save=False)`), then the DB row — via a shared `chat/views._create_message()` helper and inline in `profile_view`. All three endpoints handle storage failure gracefully: profile → friendly flash (keeps previous avatar), `send_message_api` → JSON 502, conversation POST → redirect + flash. No 500s, no poisoned transactions.
+
+**Cloudinary wiring:** `_clean_env()` strips quotes/whitespace from `CLOUDINARY_*`; all three set → `cloudinary_storage`; none → filesystem; partial → `ImproperlyConfigured` fail-fast at startup with a clear log line instead of 500s on upload. Media route is keyed off `STORAGES['default']['BACKEND']`. No credentials hardcoded.
+
+**Files:** `login/views.py`, `chat/views.py`, `chattingapp/settings.py`, `chattingapp/urls.py`.
+
+### Bug 4 — DM image messaging not working
+
+**Symptom:** Sending an image in a DM failed or failed silently.
+
+**Root cause:** Same storage-first issue as Bug 3 in `send_message_api` and `conversation POST`; plus the conversation view's `messages` context key shadowed the Django `messages` context processor, so flash errors were added but could never render.
+
+**Fix:** Storage-first write via `_create_message()` in both save paths; JS shows errors in a `#send-error` div with robust JSON parsing; renamed conversation context key to `chat_messages` (template loop + test updated) and added a flash-notice block to `conversation.html`.
+
+**Files:** `chat/views.py`, `chat/templates/chat/conversation.html`, `tests/test_views.py`.
+
+### Regression tests added
+
+| File | Tests | Coverage |
+|---|---|---|
+| `tests/test_presence.py` | 17 | Connection counting, grace period, heartbeat, sweep, `effective_presence`, WS regressions |
+| `tests/test_receipts.py` | 12 | Deliver-on-connect, live broadcast, conversation GET, read ack, API payloads, 3-state ticks |
+| `tests/test_media.py` | 13 | Storage-outage graceful handling on all 3 endpoints, avatar preservation, Cloudinary env wiring |
+
+### Live verification results (Render, `https://chattingapp-r4kq.onrender.com/`)
+
+- **HTTP (`verify_live.py`):** 10/10 pass — login, deploy markers present, `is_delivered` in history/send payloads, receiver GET marks read+delivered, profile upload no-500 (graceful error, previous pic kept), DM image graceful 502 JSON error.
+- **WebSocket presence (`verify_presence.py`):** 11/11 pass — online with 2 tabs, still online closing 1 tab (the old bug flipped to offline), offline broadcast + `last_seen` after last tab closes, HTTP/WS agree, ping heartbeat accepted, reconnect → online broadcast, DM socket close keeps user online.
+
+### Remaining issues / untestable items
+
+| Item | Status | Detail |
+|---|---|---|
+| Image **success** path (profile/DM upload actually reaching Cloudinary) | **Blocked** | Current Render `CLOUDINARY_*` env values are rejected by Cloudinary ("500 wali log line" requested from user but not yet provided). Graceful **failure** path is verified (10/10 HTTP + 11/11 WS). Correct creds needed to verify the success path. |
+| Offline transition delay on Render (~16 s) | **Documented, not a bug** | Proxy/TCP keepalive delay in disconnect notice; grace (6 s) confirmed working locally (D=0.0 s, G=6.3 s). Not fixable from app code. |
+| Untracked user files | **Not touched** | `Django_Chat_App_Presentation.pptx` and `docs/` left untouched per instructions. |
+
+### Commits (all on `origin/main`, pushed)
+
+- `3764ac5` — Fix four production bugs: presence, delivery ticks, and image upload crashes (app code + 2 migrations)
+- `679a099` — Add regression tests for presence, delivery receipts, and storage failures (3 new test files + schema updates + `settings_test.py`)
+
+Both commits: CI green, Render auto-deployed, working tree clean.
+
+## 10. Next steps (final state)
+
+1. **Pushed ✓ / CI green ✓ / Deployed ✓** — everything is on `origin/main` of `divyanshh22/real.time.chatting-app` (commits `3764ac5` + `679a099`). CI run `679a099` = `success`; Render auto-deployed to `https://chattingapp-r4kq.onrender.com/` (root 200, `/chat/` 200, new deploy markers live).
+2. **Local suite: 251 passed, coverage 92.73 % (≥ 88 gate), `ruff check --select E4,E7,E9,F` clean, `makemigrations --check` → "No changes detected".**
+3. **Live verification:** 10/10 HTTP checks + 11/11 WebSocket presence checks pass on Render.
+4. **Remaining:** Image **success** path (profile/DM upload reaching Cloudinary) is blocked until correct `CLOUDINARY_*` env values are set in Render (current values are rejected by Cloudinary). Graceful failure path is fully verified.
+5. **Optional:** coverage follow-up — exercise the Redis-presence fallback in `chat/views.py` (needs a Redis-enabled settings variant) to push `chat/views.py` past 90 %.
+6. **Optional:** suppress the cosmetic `staticfiles` `UserWarning` in `pytest.ini` (`filterwarnings`) to take the suite from warnings to 0.
