@@ -1,0 +1,82 @@
+# Render Blueprint — Django + Channels real-time chat
+# https://render.com/docs/blueprints
+#
+# Create it in the Render Dashboard: New > Blueprint > this repository
+# (branch `main`). Render looks for this file at the repository root —
+# every push to `main` that changes it re-applies the blueprint.
+#
+# This reuses the Render files that already existed in this repo:
+#   * build.sh     → buildCommand (pip install + collectstatic + migrate)
+#   * Procfile     → same daphne command, bound to Render's $PORT
+#
+# Heads-ups:
+#   * The Free Postgres plan EXPIRES 30 DAYS AFTER CREATION (upgrade the plan
+#     in the dashboard to keep the data). The Free web plan spins down after
+#     15 idle minutes and wakes on the next request (~1 min).
+#   * Redis is intentionally not provisioned: one web instance uses the
+#     in-memory Channels layer (USE_REDIS=false). For multi-instance scaling
+#     add a Key Value resource (see the commented block at the bottom) and
+#     flip USE_REDIS/REDIS_URL accordingly.
+
+services:
+  - type: web
+    name: chattingapp
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    buildCommand: ./build.sh
+    startCommand: daphne -b 0.0.0.0 -p $PORT chattingapp.asgi:application
+    # HTTP checks pass on any 2xx/3xx, so Django's SECURE_SSL_REDIRECT
+    # (DEBUG=false) answering 301 for plain-HTTP probes still counts healthy.
+    # Render sends the service's onrender.com hostname as Host, which is
+    # exactly what ALLOWED_HOSTS below is wired to.
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13" # matches the Dockerfile base image (python:3.13-slim)
+      - key: SECRET_KEY
+        generateValue: true # never the insecure fallback hardcoded in settings.py
+      - key: DEBUG
+        value: "false" # turns on the secure cookie/SSL settings
+      - key: ALLOWED_HOSTS
+        fromService:
+          type: web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+          name: chattingapp
+      - key: USE_REDIS
+        value: "false" # in-memory channel layer — correct for a single instance
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chattingapp-db
+          property: connectionString
+      # Optional: without these, uploaded media goes to the instance's
+      # ephemeral disk and is lost on redeploy. Fill in the three values in
+      # the service's Environment tab to store uploads on Cloudinary instead.
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      # Scaling to >1 instance? Create the Key Value resource below, then:
+      #   - key: USE_REDIS
+      #     value: "true"
+      #   - key: REDIS_URL
+      #     fromService:
+      #       name: chattingapp-kv
+      #       type: keyvalue
+      #       property: connectionString
+
+databases:
+  - name: chattingapp-db
+    plan: free # 0.1 CPU / 256 MB / 1 GB — EXPIRES AFTER 30 DAYS (see header)
+    databaseName: chatdb
+    user: chatuser
+
+# To enable Redis-backed pub/sub later, uncomment:
+#   - type: keyvalue
+#     name: chattingapp-kv
+#     plan: free
+#     maxmemoryPolicy: allkeys-lru

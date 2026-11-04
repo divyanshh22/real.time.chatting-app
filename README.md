@@ -57,6 +57,16 @@ docker compose logs -f web
 docker compose down
 ```
 
+## Deploy on Render
+
+The repository ships a [Render Blueprint](https://render.com/docs/blueprints) in `render.yaml`:
+
+1. Render Dashboard → **New → Blueprint** → connect this repository (branch `main`).
+2. Render finds `render.yaml` at the repo root and proposes the stack: a web service (build via `./build.sh`, serve with Daphne on Render's `$PORT`) plus a PostgreSQL instance wired into `DATABASE_URL` automatically.
+3. Click **Deploy Blueprint**. Optional: fill the three `CLOUDINARY_*` values in the service's **Environment** tab so uploaded media survives redeploys.
+
+Notes: the Free Postgres plan expires 30 days after creation (upgrade it to keep the data), and a single web instance uses the in-memory Channels layer — add a Key Value resource and set `USE_REDIS=true` + `REDIS_URL` before scaling beyond one instance.
+
 ## Local Development (without Docker)
 
 ```bash
