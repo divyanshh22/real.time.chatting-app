@@ -63,17 +63,13 @@
 
 <script>
 (function() {
-    const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-    const presenceSocket = new WebSocket(protocol + window.location.host + "/ws/presence/");
     const inboxApiUrl = '{% url "chat:home-inbox-api" %}';
+    const userIds = [{% for user in chat_users %}{{ user.id }}{% if not forloop.last %},{% endif %}{% endfor %}];
 
-    presenceSocket.onopen = function() {
-        const userIds = [{% for user in chat_users %}{{ user.id }}{% if not forloop.last %},{% endif %}{% endfor %}];
-        presenceSocket.send(JSON.stringify({ type: "get_status", user_ids: userIds }));
-    };
-
-    presenceSocket.onmessage = function(e) {
-        const data = JSON.parse(e.data);
+    // The presence socket lives in base.html (one per tab, every page).
+    // This page only listens for its events.
+    window.addEventListener("presence-message", function(e) {
+        const data = e.detail;
 
         if (data.type === "presence_update") {
             updateUserStatus(data.user_id, data.status);
@@ -84,11 +80,18 @@
                 updateUserStatus(userId, info.status);
             }
         }
-    };
+    });
 
-    presenceSocket.onerror = function(err) {
-        console.error("Presence socket error:", err);
-    };
+    function requestStatus() {
+        const socket = window.appPresenceSocket;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "get_status", user_ids: userIds }));
+        }
+    }
+    window.addEventListener("presence-open", requestStatus);
+    if (window.appPresenceSocket && window.appPresenceSocket.readyState === WebSocket.OPEN) {
+        requestStatus(); // socket already up (e.g. script re-run)
+    }
 
     function updateUserStatus(userId, status) {
         const dot = document.getElementById("dot-" + userId);

@@ -5,8 +5,11 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
+import logging
 from .models import CustomUser, ProfilePic
 from .utils import is_valid_image_upload
+
+logger = logging.getLogger(__name__)
 
 
 def login_view(request):
@@ -111,14 +114,37 @@ def profile_view(request):
         if pic and not is_valid_image_upload(pic):
             messages.error(request, "Please upload a valid image (JPG, PNG, WEBP) under 5 MB.")
             return redirect('profile-view')
+
+        pic_saved = True
         if pic:
-            profile.profile_pic = pic
-            profile.save()
+            try:
+                # Write the file to storage FIRST, outside Model.save():
+                # Model.save() wraps the file write in
+                # mark_for_rollback_on_error, so a storage failure there
+                # would poison the surrounding transaction and take every
+                # later query down with it.
+                profile.profile_pic.save(pic.name, pic, save=False)
+                profile.save()  # DB only — the file is already stored
+            except Exception:
+                # Storage failure (e.g. Cloudinary rejecting credentials)
+                # must surface as a friendly message, not an HTTP 500.
+                logger.exception("Profile picture upload failed for %s", request.user.username)
+                pic_saved = False
+                profile.refresh_from_db()  # drop the failed in-memory file
+
         request.user.first_name = request.POST.get('first_name', '')
         request.user.last_name = request.POST.get('last_name', '')
         request.user.email = request.POST.get('email', '')
         request.user.save()
-        messages.success(request, 'Profile updated!')
+
+        if pic_saved:
+            messages.success(request, 'Profile updated!')
+        else:
+            messages.error(
+                request,
+                'Profile details saved, but the picture could not be uploaded — '
+                'the file storage service is unavailable. Please try again later.'
+            )
         return redirect('profile-view')
 
     return render(request, 'login/profile.html', {'profile': profile})

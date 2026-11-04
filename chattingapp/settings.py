@@ -161,16 +161,62 @@ STORAGES = {
 }
 
 # Cloudinary Configuration for Media Uploads in Production
-CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', ''),
-    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', ''),
-    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', ''),
-}
+def _clean_env(name):
+    """Read an env var with quotes/whitespace stripped.
 
-if os.environ.get('CLOUDINARY_CLOUD_NAME'):
+    Values pasted into Render's env editor often arrive as
+    ``"abc123"`` or with a trailing newline, which Cloudinary rejects
+    with AuthorizationRequired (the source of the old HTTP 500s).
+    """
+    return os.environ.get(name, '').strip().strip('"').strip("'")
+
+
+def cloudinary_status():
+    """Decide media storage from the environment.
+
+    Returns ``(credentials, enabled, error)``:
+
+    * all three ``CLOUDINARY_*`` values present -> Cloudinary storage,
+    * none present -> local filesystem storage,
+    * partially set -> an error message (fail fast at startup with a clear
+      log line instead of HTTP 500-ing on every upload later).
+    """
+    credentials = {
+        'CLOUD_NAME': _clean_env('CLOUDINARY_CLOUD_NAME'),
+        'API_KEY': _clean_env('CLOUDINARY_API_KEY'),
+        'API_SECRET': _clean_env('CLOUDINARY_API_SECRET'),
+    }
+    provided = [key for key, value in credentials.items() if value]
+    if len(provided) == 3:
+        return credentials, True, None
+    if not provided:
+        return credentials, False, None
+    missing = [key for key in credentials if key not in provided]
+    return credentials, False, (
+        'Incomplete CLOUDINARY_* configuration: missing '
+        + ', '.join('CLOUDINARY_' + key for key in missing)
+        + '. Set all three (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, '
+          'CLOUDINARY_API_SECRET) or unset them all to use local storage.'
+    )
+
+
+CLOUDINARY_STORAGE, _CLOUDINARY_ENABLED, _CLOUDINARY_ERROR = cloudinary_status()
+
+if _CLOUDINARY_ERROR:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(_CLOUDINARY_ERROR)
+
+if _CLOUDINARY_ENABLED:
     STORAGES['default'] = {
         'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage'
     }
+    # The package registers its app config (settings reload hooks, validators).
+    INSTALLED_APPS.append('cloudinary_storage')
+
+# Presence: how long to wait after a user's LAST WebSocket closes before
+# announcing them offline — hides the socket churn of page navigation and
+# reconnects. Overridable per environment (tests use 0 for determinism).
+PRESENCE_OFFLINE_GRACE_SECONDS = int(os.environ.get('PRESENCE_OFFLINE_GRACE_SECONDS', '6'))
 
 LOGIN_URL = 'login-view'
 LOGIN_REDIRECT_URL = 'chat:home-view'

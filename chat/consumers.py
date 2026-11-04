@@ -4,6 +4,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
+from . import presence
 from .models import Message
 from login.models import CustomUser
 
@@ -29,9 +30,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         except Exception:
             pass
 
-        await database_sync_to_async(self._set_online_state)(self.me.id, True)
+        # Presence is counted (not blindly set): the user may have other
+        # tabs/devices connected — see chat/presence.py.
+        await presence.connection_opened(self.me.id, self.me.username)
         await self.accept()
         await self._announce_status('online')
+
+        # Messages that arrived while this conversation was closed become
+        # "delivered" the moment the receiver opens it (double tick).
+        delivered_ids = await database_sync_to_async(self._deliver_pending)()
+        if delivered_ids:
+            await self._broadcast_delivered(delivered_ids)
 
     async def disconnect(self, close_code):
         if not hasattr(self, 'room_group_name'):
@@ -44,8 +53,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         except Exception:
             pass
 
-        await database_sync_to_async(self._set_online_state)(self.me.id, False)
-        await self._announce_status('offline')
+        # Only announce "offline" to this room when the user is really gone
+        # (last connection closed and the grace period expired).
+        last_seen = await presence.connection_closed(self.me.id, self.me.username)
+        if last_seen is not None:
+            await self._announce_status('offline', last_seen)
 
     async def receive(self, text_data=None, bytes_data=None):
         if text_data is None:
@@ -57,6 +69,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return  # malformed JSON is dropped instead of crashing the consumer
         if not isinstance(payload, dict):
             return
+
+        # Any traffic proves this socket is alive (throttled server-side).
+        await database_sync_to_async(presence.touch_heartbeat)(self.me.id)
 
         message_type = payload.get('type')
 
@@ -71,6 +86,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             'type': 'message',
             'message': event['message'],
+        }))
+
+        # The receiver just got the message on an OPEN conversation => it is
+        # delivered (single tick -> double tick), announced to the room so
+        # the sender's client updates instantly without a refresh.
+        message = event.get('message') or {}
+        if message.get('sender_id') != getattr(self.me, 'id', None):
+            delivered_ids = await database_sync_to_async(self._mark_delivered)(message.get('id'))
+            if delivered_ids:
+                await self._broadcast_delivered(delivered_ids)
+
+    async def message_delivered(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'message_delivered',
+            'message_ids': event['message_ids'],
         }))
 
     async def user_status(self, event):
@@ -98,7 +128,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
     def _get_room_group_name(user_id_1, user_id_2):
         return f"chat_{min(user_id_1, user_id_2)}_{max(user_id_1, user_id_2)}"
 
-    async def _announce_status(self, status):
+    async def _announce_status(self, status, last_seen=None):
         now = timezone.now().isoformat()
         try:
             await self.channel_layer.group_send(
@@ -106,9 +136,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 {
                     'type': 'user_status',
                     'status': status,
-                    'last_seen': now if status == 'offline' else None,
+                    'last_seen': last_seen or (now if status == 'offline' else None),
                     'username': self.me.username,
                 }
+            )
+        except Exception:
+            pass
+
+    async def _broadcast_delivered(self, message_ids):
+        try:
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {'type': 'message_delivered', 'message_ids': message_ids},
             )
         except Exception:
             pass
@@ -149,6 +188,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'photo_url': message.photo.url if message.photo else None,
                         'timestamp': message.timestamp.isoformat(),
                         'is_read': message.is_read,
+                        'is_delivered': message.is_delivered,
                     },
                 }
             )
@@ -162,11 +202,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
             text=text,
         )
 
-    def _set_online_state(self, user_id, is_online):
-        CustomUser.objects.filter(id=user_id).update(
-            is_online=is_online,
-            last_seen=None if is_online else timezone.now(),
+    def _deliver_pending(self):
+        """Mark messages that waited in the inbox as delivered (ids returned)."""
+        ids = list(
+            Message.objects.filter(
+                sender=self.other_user, receiver=self.me, is_delivered=False,
+            ).values_list('id', flat=True)
         )
+        if ids:
+            Message.objects.filter(id__in=ids, is_delivered=False).update(is_delivered=True)
+        return ids
+
+    def _mark_delivered(self, message_id):
+        """Atomically deliver one incoming message; only the connection that
+        actually flips the flag broadcasts, so multi-tab receivers don't
+        duplicate the announcement."""
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return []
+        updated = Message.objects.filter(
+            id=message_id, receiver=self.me, is_delivered=False,
+        ).update(is_delivered=True)
+        return [message_id] if updated else []
 
     async def _mark_messages_read(self, message_ids):
         if not isinstance(message_ids, (list, tuple)):
@@ -192,4 +248,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             pass
 
     def _mark_ids_as_read(self, message_ids):
-        return Message.objects.filter(id__in=message_ids, receiver=self.me).update(is_read=True)
+        # read implies delivered — keep the two flags consistent even when
+        # the read ack races ahead of the delivery marking
+        return Message.objects.filter(
+            id__in=message_ids, receiver=self.me,
+        ).update(is_read=True, is_delivered=True)

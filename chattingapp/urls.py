@@ -26,9 +26,16 @@ urlpatterns = [
     path('chat/', include('chat.urls', namespace='chat')),
 ]
 
+# Media serving: which route (if any) this deployment needs depends on
+# WHERE the default storage writes files — not on INSTALLED_APPS.
+_default_storage_backend = settings.STORAGES.get('default', {}).get('BACKEND', '')
+
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-elif 'cloudinary_storage' not in settings.INSTALLED_APPS:
+elif _default_storage_backend == 'django.core.files.storage.FileSystemStorage':
+    # Local-disk media in production (no Cloudinary configured) — serve it.
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', static_serve, {'document_root': settings.MEDIA_ROOT}),
     ]
+# else: media lives on Cloudinary; URLs point at res.cloudinary.com and no
+# local /media/ route is needed.

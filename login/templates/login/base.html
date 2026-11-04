@@ -406,5 +406,60 @@ main{padding:1.25rem 1rem;}
 
 <footer>MyApp · Real-time chat built with Django &amp; Channels</footer>
 
+{% if user.is_authenticated %}
+<script>
+// One presence socket per tab, kept open on EVERY authenticated page.
+// Page navigation closes it and the next page opens a new one — the server
+// counts connections and applies a short grace period, so switching pages
+// never flashes "offline" to other users. Events are re-dispatched on the
+// window as 'presence-open' / 'presence-message' for page scripts to use.
+(function () {
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var socket = null;
+  var attempts = 0;
+  var heartbeatTimer = null;
+
+  function connect() {
+    socket = new WebSocket(protocol + '//' + window.location.host + '/ws/presence/');
+
+    socket.onopen = function () {
+      attempts = 0;
+      window.appPresenceSocket = socket;
+      window.dispatchEvent(new Event('presence-open'));
+      // Heartbeat: proves this tab is alive so the server can tell a real
+      // logout apart from a crashed/dropped connection.
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = setInterval(function () {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
+    };
+
+    socket.onmessage = function (event) {
+      var data;
+      try { data = JSON.parse(event.data); } catch (e) { return; }
+      window.dispatchEvent(new CustomEvent('presence-message', { detail: data }));
+    };
+
+    socket.onclose = function () {
+      clearInterval(heartbeatTimer);
+      if (window.appPresenceSocket === socket) {
+        window.appPresenceSocket = null;
+      }
+      if (attempts < 5) { // reconnect after drops (network blips, sleeps)
+        attempts += 1;
+        setTimeout(connect, Math.min(1000 * attempts, 5000));
+      }
+    };
+
+    socket.onerror = function () {}; // onclose drives the retry
+  }
+
+  connect();
+})();
+</script>
+{% endif %}
+
 </body>
 </html>

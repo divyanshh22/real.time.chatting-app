@@ -1,3 +1,4 @@
+import logging
 import redis
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -13,7 +14,10 @@ from django.views.decorators.http import require_http_methods
 from login.models import CustomUser, ProfilePic
 from login.utils import is_valid_image_upload
 
+from . import presence
 from .models import Message
+
+logger = logging.getLogger(__name__)
 
 
 def _redis_client():
@@ -83,9 +87,14 @@ def get_room_group_name(user_id_1, user_id_2):
 
 
 def get_user_presence(user_id):
+    """Effective presence: never trusts a stale ``is_online`` flag.
+
+    ``presence.effective_presence`` self-heals ghosts (crashed sockets,
+    legacy rows) so a viewer always gets the truth.
+    """
     user = CustomUser.objects.filter(id=user_id).first()
     if user:
-        return bool(user.is_online), user.last_seen.isoformat() if user.last_seen else None
+        return presence.effective_presence(user)
 
     r = _redis_client()
     if r is not None:
@@ -98,28 +107,28 @@ def get_user_presence(user_id):
     return False, None
 
 
-def set_user_presence(user_id, is_online, last_seen=None):
+def _broadcast_receipts(user_id_1, user_id_2, message_ids):
+    """Tell the whole room (especially the sender) about delivery + read.
+
+    Used by the conversation GET: opening the page delivers and reads the
+    incoming messages, and the sender must see the ticks update live
+    instead of only after they reopen the DM themselves.
+    """
+    if not message_ids:
+        return
     try:
-        CustomUser.objects.filter(id=user_id).update(
-            is_online=is_online,
-            last_seen=last_seen if not is_online else None,
+        channel_layer = get_channel_layer()
+        if channel_layer is None:
+            return
+        group = get_room_group_name(user_id_1, user_id_2)
+        async_to_sync(channel_layer.group_send)(
+            group, {'type': 'message_delivered', 'message_ids': message_ids}
+        )
+        async_to_sync(channel_layer.group_send)(
+            group, {'type': 'messages_read', 'message_ids': message_ids}
         )
     except Exception:
         pass
-
-    r = _redis_client()
-    if r is not None:
-        try:
-            if is_online:
-                r.hset('online_users', str(user_id), 'online')
-                r.hdel('last_seen', str(user_id))
-            else:
-                r.hdel('online_users', str(user_id))
-                if last_seen is None:
-                    last_seen = timezone.now().isoformat()
-                r.hset('last_seen', str(user_id), last_seen)
-        except Exception:
-            pass
 
 
 @login_required(login_url='login-view')
@@ -159,12 +168,18 @@ def conversation_view(request, username):
         Q(sender=other_user, receiver=request.user)
     ).order_by('timestamp')
 
-    # messages read mark karo
-    Message.objects.filter(
-        sender=other_user,
-        receiver=request.user,
-        is_read=False
-    ).update(is_read=True)
+    # Opening the conversation means the receiver has it open: mark incoming
+    # messages delivered + read, and broadcast the transition so the sender's
+    # open chat updates its ticks instantly (was: sender never found out
+    # until they reopened the DM themselves).
+    changed_ids = list(
+        Message.objects.filter(sender=other_user, receiver=request.user)
+        .filter(Q(is_read=False) | Q(is_delivered=False))
+        .values_list('id', flat=True)
+    )
+    if changed_ids:
+        Message.objects.filter(id__in=changed_ids).update(is_read=True, is_delivered=True)
+        _broadcast_receipts(request.user.id, other_user.id, changed_ids)
 
     # POST - naya message save karo
     if request.method == 'POST':
@@ -178,12 +193,23 @@ def conversation_view(request, username):
             return redirect('chat:conversation-view', username=username)
 
         if text or photo:
-            message = Message.objects.create(
-                sender=request.user,
-                receiver=other_user,
-                text=text,
-                photo=photo
-            )
+            try:
+                message = _create_message(
+                    sender=request.user,
+                    receiver=other_user,
+                    text=text,
+                    photo=photo,
+                )
+            except Exception:
+                # Storage failure (e.g. Cloudinary rejecting credentials)
+                # must not take the whole page down — log the real
+                # traceback and tell the user plainly.
+                logger.exception("Failed to save message photo for %s", request.user.username)
+                django_messages.error(
+                    request,
+                    "Couldn't send that — the file storage service is unavailable. Please try again."
+                )
+                return redirect('chat:conversation-view', username=username)
 
             # Broadcast over WebSocket so the other user gets it in real time
             try:
@@ -198,6 +224,7 @@ def conversation_view(request, username):
                         'photo_url': message.photo.url if message.photo else None,
                         'timestamp': message.timestamp.isoformat(),
                         'is_read': message.is_read,
+                        'is_delivered': message.is_delivered,
                     },
                 })
             except Exception:
@@ -209,7 +236,10 @@ def conversation_view(request, username):
 
     return render(request, 'chat/conversation.html', {
         'other_user': other_user,
-        'messages': messages,
+        # NB: NOT 'messages' — that name belongs to the Django messages
+        # context processor (flash notices). Shadowing it meant storage/
+        # validation errors were added but could never render.
+        'chat_messages': messages,
     })
 
 
@@ -229,6 +259,22 @@ def search_view(request):
     })
 
 
+def _create_message(sender, receiver, text, photo=None):
+    """Persist a message, storing any photo BEFORE the DB row.
+
+    ``Model.save()`` writes the file inside ``mark_for_rollback_on_error``,
+    so a storage outage (e.g. Cloudinary rejecting credentials) would poison
+    the surrounding transaction and turn a handled error into a 500. Writing
+    the file first keeps the two steps independent: storage failure = no row,
+    DB failure = clean exception with no half-stored file attached.
+    """
+    message = Message(sender=sender, receiver=receiver, text=text)
+    if photo:
+        message.photo.save(photo.name, photo, save=False)
+    message.save()
+    return message
+
+
 @login_required(login_url='login-view')
 @require_http_methods(["POST"])
 def send_message_api(request, username):
@@ -243,12 +289,21 @@ def send_message_api(request, username):
     if not text and not photo:
         return JsonResponse({'error': 'Message cannot be empty'}, status=400)
 
-    message = Message.objects.create(
-        sender=request.user,
-        receiver=other_user,
-        text=text,
-        photo=photo,
-    )
+    try:
+        message = _create_message(
+            sender=request.user,
+            receiver=other_user,
+            text=text,
+            photo=photo,
+        )
+    except Exception:
+        # Storage failure (e.g. Cloudinary rejecting credentials) — log the
+        # real traceback and return a clean JSON error the JS can display.
+        logger.exception("Failed to save message for %s", request.user.username)
+        return JsonResponse(
+            {'error': 'Could not send: the file storage service is unavailable. Please try again.'},
+            status=502,
+        )
 
     room_group_name = get_room_group_name(request.user.id, other_user.id)
     payload = {
@@ -261,6 +316,7 @@ def send_message_api(request, username):
             'photo_url': message.photo.url if message.photo else None,
             'timestamp': message.timestamp.isoformat(),
             'is_read': message.is_read,
+            'is_delivered': message.is_delivered,
         },
     }
 
@@ -296,7 +352,8 @@ def get_messages_api(request, username):
             'text': msg.text,
             'photo_url': msg.photo.url if msg.photo else None,
             'timestamp': msg.timestamp.isoformat(),
-            'is_read': msg.is_read
+            'is_read': msg.is_read,
+            'is_delivered': msg.is_delivered,
         })
 
     return JsonResponse({'messages': messages_data})

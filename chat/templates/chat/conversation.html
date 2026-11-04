@@ -2,6 +2,15 @@
 {% block title %}Chat with {{ other_user.username }}{% endblock %}
 
 {% block content %}
+<!-- Flash notices (errors like "storage unavailable", validation, ...) -->
+{% for notice in messages %}
+  <div class="alert {% if notice.tags == 'error' %}alert-error{% elif notice.tags == 'success' %}alert-success{% else %}alert-info{% endif %}"
+       style="margin-bottom:12px;padding:10px 14px;border-radius:10px;font-size:13.5px;
+              background:{% if notice.tags == 'error' %}rgba(249,107,107,0.12);color:var(--danger);border:1px solid rgba(249,107,107,0.35);{% else %}rgba(74,222,128,0.12);color:var(--success);border:1px solid rgba(74,222,128,0.35);{% endif %}">
+    {{ notice }}
+  </div>
+{% endfor %}
+
 <div class="card" style="max-width:600px;padding:0;overflow:hidden;box-shadow:var(--shadow);">
 
   <!-- Header -->
@@ -50,9 +59,10 @@
 
   <!-- Messages -->
   <div id="msg-box" style="height:420px;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth;">
-    {% for msg in messages %}
+    {% for msg in chat_messages %}
       <div class="message" data-message-id="{{ msg.id }}" data-sender-id="{{ msg.sender.id }}"
            data-read="{% if msg.is_read %}true{% else %}false{% endif %}"
+           data-delivered="{% if msg.is_delivered %}true{% else %}false{% endif %}"
            style="display:flex;flex-direction:column;max-width:76%;
                   align-self:{% if msg.sender == request.user %}flex-end{% else %}flex-start{% endif %};
                   align-items:{% if msg.sender == request.user %}flex-end{% else %}flex-start{% endif %};">
@@ -73,12 +83,19 @@
                       position:relative;word-break:break-word;">
             {{ msg.text }}
             {% if msg.sender == request.user %}
-              <span class="read-status" style="font-size:10px;margin-left:8px;opacity:0.9;white-space:nowrap;"
+              <span class="read-status" style="font-size:10px;margin-left:8px;opacity:0.9;white-space:nowrap;{% if msg.is_read %}color:#4ade80;{% elif msg.is_delivered %}color:rgba(255,255,255,0.9);{% else %}color:rgba(255,255,255,0.6);{% endif %}"
                     data-message-id="{{ msg.id }}"
-                    {% if msg.is_read %}data-read="true"{% endif %}>
-                {% if msg.is_read %}✓✓{% else %}✓{% endif %}
-              </span>
+                    data-read="{% if msg.is_read %}true{% else %}false{% endif %}"
+                    data-delivered="{% if msg.is_delivered %}true{% else %}false{% endif %}">{% if msg.is_read %}✓✓{% elif msg.is_delivered %}✓✓{% else %}✓{% endif %}</span>
             {% endif %}
+          </div>
+        {% elif msg.photo and msg.sender == request.user %}
+          <!-- photo-only message: tick lives in its own row -->
+          <div style="display:flex;justify-content:flex-end;">
+            <span class="read-status" style="font-size:10px;opacity:0.9;white-space:nowrap;{% if msg.is_read %}color:#4ade80;{% elif msg.is_delivered %}color:rgba(255,255,255,0.9);{% else %}color:rgba(255,255,255,0.6);{% endif %}"
+                  data-message-id="{{ msg.id }}"
+                  data-read="{% if msg.is_read %}true{% else %}false{% endif %}"
+                  data-delivered="{% if msg.is_delivered %}true{% else %}false{% endif %}">{% if msg.is_read %}✓✓{% elif msg.is_delivered %}✓✓{% else %}✓{% endif %}</span>
           </div>
         {% endif %}
 
@@ -103,7 +120,9 @@
   <form id="msg-form" method="POST" enctype="multipart/form-data"
         style="padding:14px 16px 16px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:10px;background:var(--surface);">
     {% csrf_token %}
-    
+
+    <div id="send-error" style="display:none;color:var(--danger);font-size:12.5px;padding:0 4px;"></div>
+
     <div style="display:flex;gap:8px;align-items:center;">
       <button type="button" id="photo-btn" title="Attach photo"
               style="width:auto;padding:10px 12px;border-radius:50%;background:var(--surface-2);border:1px solid var(--border);color:var(--muted);font-size:16px;box-shadow:none;flex-shrink:0;">📷</button>
@@ -151,6 +170,35 @@
   const typingIndicator = document.getElementById('typing-indicator');
   const typingText = document.getElementById('typing-text');
   const onlineIndicator = document.getElementById('online-indicator');
+  const sendError = document.getElementById('send-error');
+
+  // --------------------------------------------------------------------- //
+  // App-wide presence: the socket lives in base.html (one per tab, open on
+  // every page). We only listen for events about THIS conversation's user,
+  // so status stays correct no matter which DM or page is open.
+  // --------------------------------------------------------------------- //
+  function requestOtherStatus() {
+    const socket = window.appPresenceSocket;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'get_status', user_ids: [otherUserId] }));
+    }
+  }
+
+  window.addEventListener('presence-message', function(e) {
+    const data = e.detail;
+    if (!data) return;
+
+    if (data.type === 'presence_update' && data.user_id === otherUserId) {
+      updateUserStatus(data);
+    } else if (data.type === 'bulk_status' && data.statuses && data.statuses[String(otherUserId)]) {
+      const info = data.statuses[String(otherUserId)];
+      updateUserStatus({ status: info.status, last_seen: info.last_seen });
+    }
+  });
+  window.addEventListener('presence-open', requestOtherStatus);
+  if (window.appPresenceSocket && window.appPresenceSocket.readyState === WebSocket.OPEN) {
+    requestOtherStatus();
+  }
   
   // Connect to WebSocket
   function connect() {
@@ -199,6 +247,9 @@
           markMessageAsRead(data.message.id);
         }
         break;
+      case 'message_delivered':
+        updateDeliveredStatus(data.message_ids);
+        break;
       case 'user_status':
         updateUserStatus(data);
         break;
@@ -233,6 +284,7 @@
     messageDiv.dataset.messageId = message.id;
     messageDiv.dataset.senderId = message.sender_id;
     messageDiv.dataset.read = message.is_read ? 'true' : 'false';
+    messageDiv.dataset.delivered = message.is_delivered ? 'true' : 'false';
     messageDiv.style.cssText = `display:flex;flex-direction:column;max-width:76%;align-self:${isOwn ? 'flex-end' : 'flex-start'};align-items:${isOwn ? 'flex-end' : 'flex-start'};`;
 
     let html = '';
@@ -240,20 +292,34 @@
       html += `<img src="${message.photo_url}" style="max-width:220px;border-radius:14px;cursor:pointer;border:1px solid var(--border);" onclick="window.open(this.src)">`;
     }
     if (message.text) {
-      const tickText = isOwn ? (message.is_read ? '✓✓' : '✓') : '';
       html += `<div style="max-width:100%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.5;word-break:break-word;
                       ${isOwn
                         ? `background:linear-gradient(135deg,var(--accent),#6a5af0);color:white;border-bottom-right-radius:4px;`
                         : `background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-bottom-left-radius:4px;`}">
                 ${escapeHtml(message.text)}
-                ${isOwn ? `<span class="read-status" style="font-size:10px;margin-left:8px;opacity:0.9;white-space:nowrap;color:${message.is_read ? '#a7f3d0' : 'rgba(255,255,255,0.7)'};" data-message-id="${message.id}">${tickText}</span>` : ''}
+                ${isOwn ? tickMarkup(message) : ''}
                </div>`;
+    } else if (message.photo_url && isOwn) {
+      // photo-only message: tick in its own row
+      html += `<div style="display:flex;justify-content:flex-end;">${tickMarkup(message)}</div>`;
     }
     html += `<div style="font-size:10.5px;color:var(--muted-2);margin-top:3px;">${formatTime(message.timestamp)}</div>`;
 
     messageDiv.innerHTML = html;
     msgBox.appendChild(messageDiv);
     scrollToBottom();
+  }
+
+  // 3-state tick: sent = single ✓, delivered = double ✓✓, read = double ✓✓ green
+  function tickMarkup(message) {
+    const state = message.is_read ? 'read' : (message.is_delivered ? 'delivered' : 'sent');
+    const text = state === 'sent' ? '✓' : '✓✓';
+    const color = state === 'read' ? '#4ade80' : (state === 'delivered' ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.6)');
+    const margin = message.text ? 'margin-left:8px;' : '';
+    return `<span class="read-status" style="font-size:10px;${margin}opacity:0.9;white-space:nowrap;color:${color};"
+             data-message-id="${message.id}"
+             data-read="${message.is_read ? 'true' : 'false'}"
+             data-delivered="${message.is_delivered ? 'true' : 'false'}">${text}</span>`;
   }
   
   function updateUserStatus(data) {
@@ -278,16 +344,35 @@
     }
   }
   
+  function updateDeliveredStatus(messageIds) {
+    messageIds.forEach(id => {
+      const statusEl = document.querySelector(`.read-status[data-message-id="${id}"]`);
+      // Never downgrade a tick that is already green (read).
+      if (statusEl && statusEl.dataset.read !== 'true') {
+        statusEl.textContent = '✓✓';
+        statusEl.style.color = 'rgba(255,255,255,0.9)';
+        statusEl.dataset.delivered = 'true';
+      }
+      const msgEl = document.querySelector(`.message[data-message-id="${id}"]`);
+      if (msgEl) {
+        msgEl.dataset.delivered = 'true';
+      }
+    });
+  }
+
   function updateReadStatus(messageIds) {
     messageIds.forEach(id => {
       const statusEl = document.querySelector(`.read-status[data-message-id="${id}"]`);
       if (statusEl) {
         statusEl.textContent = '✓✓';
         statusEl.style.color = '#4ade80';
+        statusEl.dataset.read = 'true';
+        statusEl.dataset.delivered = 'true';
       }
       const msgEl = document.querySelector(`.message[data-message-id="${id}"]`);
       if (msgEl) {
         msgEl.dataset.read = 'true';
+        msgEl.dataset.delivered = 'true';
       }
     });
   }
@@ -341,9 +426,14 @@
       body: formData,
     });
 
-    const data = await response.json();
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (e) {
+      // non-JSON error page (proxy/502) — fall through to the status text
+    }
     if (!response.ok) {
-      throw new Error(data.error || 'Unable to send message');
+      throw new Error(data.error || `Could not send the message (HTTP ${response.status}). Please try again.`);
     }
 
     if (data.message) {
@@ -419,9 +509,21 @@
       if (photoPreview) {
         photoPreview.style.display = 'none';
       }
+      if (sendError) {
+        sendError.style.display = 'none';
+        sendError.textContent = '';
+      }
       stopTyping();
     } catch (error) {
       console.error(error);
+      // Surface storage/server failures (e.g. image upload rejected) in the
+      // UI instead of failing silently in the console.
+      if (sendError) {
+        sendError.textContent = error && error.message
+          ? error.message
+          : 'Could not send the message. Please try again.';
+        sendError.style.display = 'block';
+      }
     }
   });
   
